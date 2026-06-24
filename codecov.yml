@@ -1,0 +1,26 @@
+coverage:
+  precision: 2
+  round: down
+  range: "70...100"
+  status:
+    project:
+      default:
+        target: 85%       # fail PR if overall coverage drops below 85%
+        threshold: 1%     # allow up to 1% regression before blocking
+    patch:
+      default:
+        target: 85%
+        threshold: 1%
+
+flags:
+  unittests:
+    paths:
+      - "**/*.go"
+
+ignore:
+  - "scripts/**"
+
+comment:
+  layout: "header, diff, flags, components"
+  behavior: default
+  require_changes: false
