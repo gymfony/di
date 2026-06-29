@@ -17,3 +17,10 @@ check:
 	go vet ./...
 	golangci-lint run --timeout=5m
 	go test -race -count=1 ./...
+
+help:
+	@echo "Available commands:"
+	@echo "  make test       - running tests"
+	@echo "  make test-cover - running linter"
+	@echo "  make fmt        - running automatically formats Go source code according to the official community standards"
+	@echo "  make check      - running tests and linter"
