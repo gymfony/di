@@ -1,6 +1,8 @@
 package di
 
-import "fmt"
+import (
+	"github.com/lkmavi/saferefl"
+)
 
 type ContainerBuilder struct {
 	// We use the string representation of the type from saferefl as the key,
@@ -19,7 +21,7 @@ func NewContainerBuilder() *ContainerBuilder {
 // AddProvider registers a single provider, retrieving information about the type T
 func AddProvider[T any](cb *ContainerBuilder, p Provider) error {
 	// Obtaining a type name T without heap allocations
-	typeKey := fmt.Sprintf("%T", *new(T))
+	typeKey := typeKeyOf[T]()
 
 	if _, exists := cb.providers[typeKey]; exists {
 		return &DuplicateBindingError{Type: typeKey}
@@ -33,6 +35,12 @@ func AddProvider[T any](cb *ContainerBuilder, p Provider) error {
 	}
 
 	return nil
+}
+
+// typeKeyOf returns a stable string key for type T using saferefl's TypeInfo.
+func typeKeyOf[T any]() string {
+	ti := saferefl.TypeOf[T]()
+	return ti.String()
 }
 
 func (cb *ContainerBuilder) AddSet(set Set) error {
