@@ -161,7 +161,7 @@ func TestParser_Parse_EmptyPath(t *testing.T) {
 
 // Test for a logger without a real recipient (testing the nil-safe branch)
 func TestParserLogger_NilSafety(t *testing.T) {
-	var nilLogger *ParserLogger = nil
+	var nilLogger *ParserLogger
 	// Не должно падать по panic
 	nilLogger.logDebug("test")
 	nilLogger.logInfo("test")
