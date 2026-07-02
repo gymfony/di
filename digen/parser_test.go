@@ -90,6 +90,62 @@ this is a brutal broken syntax error
 			wantErr:      true,
 			errSubstring: "digen: failed to parse flags",
 		},
+		{
+			name:         "Warning when type info is missing for argument",
+			goModContent: fmt.Sprintf("module testwarn\ngo 1.22\nrequire github.com/gymfony/di v0.0.0\nreplace github.com/gymfony/di => %s", diRootPath),
+			files: map[string]string{
+				"main.go": `package main
+import "github.com/gymfony/di"
+type Mailer struct{}
+func NewMailer() *Mailer { return &Mailer{} }
+
+// We are passing a built-in int type that doesn't have a structure in TypesInfo as a custom service,
+// or we are passing an expression whose type isn't mapped by the compiler as a valid constructor.
+var Services = di.NewSet(
+	NewMailer,
+	varWithoutType, // Using a non-constant undefined expression will trigger a warning
+)
+var varWithoutType = 123
+`,
+			},
+			args:    []string{"-project-path", "TMP_DIR"},
+			wantErr: false,
+		},
+		{
+			name:         "Skip when argument in NewSet is not a function signature",
+			goModContent: fmt.Sprintf("module testnotfunc\ngo 1.22\nrequire github.com/gymfony/di v0.0.0\nreplace github.com/gymfony/di => %s", diRootPath),
+			files: map[string]string{
+				"main.go": `package main
+import "github.com/gymfony/di"
+var NotAFunc = "just a string"
+var Services = di.NewSet(
+	NotAFunc, // This is not a function, the parser should just continue in the inner signatures loop
+)
+`,
+			},
+			args:    []string{"-project-path", "TMP_DIR"},
+			wantErr: false,
+		},
+		{
+			name:         "Error when constructor returns no values",
+			goModContent: fmt.Sprintf("module testerrvoid\ngo 1.22\nrequire github.com/gymfony/di v0.0.0\nreplace github.com/gymfony/di => %s", diRootPath),
+			files: map[string]string{
+				"main.go": `package main
+import "github.com/gymfony/di"
+func NewVoid() {} // Returns nothing
+var Services = di.NewSet(NewVoid)
+`,
+			},
+			args:    []string{"-project-path", "TMP_DIR"},
+			wantErr: false, // Our parser logs an error, but the generator itself will not crash due to an AST error.
+		},
+		{
+			name:         "Trigger logInfo with empty package list",
+			goModContent: "module testempty\ngo 1.22",
+			files:        map[string]string{}, // There are no files in the directory at all.
+			args:         []string{"-project-path", "TMP_DIR"},
+			wantErr:      false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,15 +218,21 @@ func TestParser_Parse_EmptyPath(t *testing.T) {
 // Test for a logger without a real recipient (testing the nil-safe branch)
 func TestParserLogger_NilSafety(t *testing.T) {
 	var nilLogger *ParserLogger
-	// Не должно падать по panic
-	nilLogger.logDebug("test")
-	nilLogger.logInfo("test")
-	nilLogger.logWarn("test")
-	nilLogger.logError("test")
+	nilLogger.logDebug("test %s", "arg")
+	nilLogger.logInfo("test %s", "arg")
+	nilLogger.logWarn("test %s", "arg")
+	nilLogger.logError("test %s", "arg")
 
 	emptyLogger := NewParserLogger(nil)
-	emptyLogger.logDebug("test")
-	emptyLogger.logInfo("test")
-	emptyLogger.logWarn("test")
-	emptyLogger.logError("test")
+	emptyLogger.logDebug("test %s", "arg")
+	emptyLogger.logInfo("test %s", "arg")
+	emptyLogger.logWarn("test %s", "arg")
+	emptyLogger.logError("test %s", "arg")
+
+	// Testing logging with arguments for a live logger
+	liveLogger := NewParserLogger(&mockLogger{t: t})
+	liveLogger.logDebug("live %s", "debug")
+	liveLogger.logInfo("live %s", "info")
+	liveLogger.logWarn("live %s", "warn")
+	liveLogger.logError("live %s", "error")
 }
