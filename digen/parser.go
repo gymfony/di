@@ -1,0 +1,194 @@
+package digen
+
+import (
+	"flag"
+	"fmt"
+	"go/ast"
+	"go/types"
+
+	"github.com/gymfony/di"
+	"golang.org/x/tools/go/packages"
+)
+
+type Parser struct {
+	logger *ParserLogger
+}
+
+func NewParser(logger *ParserLogger) *Parser {
+	return &Parser{
+		logger: logger,
+	}
+}
+
+func (p *Parser) Parse(args []string) (*di.DependencyGraph, error) {
+	graph := di.NewDependencyGraph()
+
+	path, err := p.getProjectPath(args)
+	if err != nil {
+		p.logger.logError("%v", err.Error())
+		return graph, err
+	}
+	p.logger.logDebug("digen: project path is %s", path)
+
+	pkgs, err := p.getPackages(path)
+	if err != nil {
+		p.logger.logError("%v", err.Error())
+		return graph, err
+	}
+	if len(pkgs) == 0 {
+		p.logger.logInfo("digen: list of packages is empty")
+		return graph, err
+	}
+
+	p.parseAST(graph, pkgs)
+
+	return graph, nil
+}
+
+func (p *Parser) getProjectPath(args []string) (string, error) {
+	fs := flag.NewFlagSet("digen", flag.ContinueOnError)
+	path := fs.String("project-path", "./", "The path to your project where dependencies need to be generated")
+	if err := fs.Parse(args); err != nil {
+		return "", fmt.Errorf("digen: failed to parse flags: %w", err)
+	}
+	if *path == "" {
+		return "", fmt.Errorf("digen: project path cannot be empty")
+	}
+	return *path, nil
+}
+
+func (p *Parser) getPackages(path string) ([]*packages.Package, error) {
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:  path,
+	}
+
+	pkg, err := packages.Load(cfg, "./...")
+	if err != nil {
+		return nil, fmt.Errorf("digen: cannot read packages: %w", err)
+	}
+	for _, p := range pkg {
+		if len(p.Errors) > 0 {
+			msgerror := fmt.Sprintf("Errors in package %s:\n", p.ID)
+			for _, pkgErr := range p.Errors {
+				msgerror = fmt.Sprintf("%s  - %s\n", msgerror, pkgErr.Error())
+			}
+			return nil, fmt.Errorf("digen: %s", msgerror)
+		}
+	}
+
+	return pkg, nil
+}
+
+func (p *Parser) parseAST(graph *di.DependencyGraph, pkgs []*packages.Package) {
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Syntax {
+			p.logger.logDebug("digen: parse file: %s", file.Name)
+
+			if isGeneratedFile(file) {
+				p.logger.logDebug("digen: skip generated file: %s", file.Name)
+				continue
+			}
+
+			ast.Inspect(file, func(n ast.Node) bool {
+				// 1. We only need variable declarations (var Services = ...)
+				valueSpec, ok := n.(*ast.ValueSpec)
+				if !ok {
+					return true
+				}
+
+				// 2. We loop through the values ​​to the right of the "=" sign
+				for _, val := range valueSpec.Values {
+					// 3. Let's check that this is a function call.
+					callExpr, ok := val.(*ast.CallExpr)
+					if !ok {
+						continue
+					}
+
+					// 4. We are passing the challenge on to rigorous packet and signature analysis
+					p.inspectNewSetCall(pkg, callExpr, graph)
+				}
+
+				return true
+			})
+		}
+	}
+}
+
+// Function for parsing the di.NewSet call
+func (p *Parser) inspectNewSetCall(pkg *packages.Package, callExpr *ast.CallExpr, graph *di.DependencyGraph) {
+	selectorExpr, ok := callExpr.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return
+	}
+
+	obj := pkg.TypesInfo.ObjectOf(selectorExpr.Sel)
+	if obj == nil {
+		return
+	}
+
+	pk := obj.Pkg()
+	if pk == nil || pk.Path() != "github.com/gymfony/di" || obj.Name() != "NewSet" {
+		return
+	}
+
+	p.logger.logDebug("🎯 Found the real one %s.%s", pk.Path(), obj.Name())
+
+	for _, arg := range callExpr.Args {
+		tv, ok := pkg.TypesInfo.Types[arg]
+		if !ok {
+			p.logger.logWarn("Unable to determine type %s", arg)
+			continue
+		}
+
+		sig, ok := tv.Type.(*types.Signature)
+		if !ok {
+			continue
+		}
+		if sig.Results().Len() == 0 {
+			p.logger.logError("The constructor %s must return at least one value", sig.String())
+			continue
+		}
+
+		resultType := sig.Results().At(0).Type().String()
+		p.logger.logDebug("The constructor %s returns a type: %s", sig.String(), resultType)
+
+		ctorName := "unknown"
+		if ident, ok := arg.(*ast.Ident); ok {
+			ctorName = ident.Name
+		}
+
+		// Querying the constructor's
+		var deps []string
+		if paramsLen := sig.Params().Len(); paramsLen > 0 {
+			p.logger.logDebug("It needs (%d) arguments:", paramsLen)
+			for j := 0; j < paramsLen; j++ {
+				p.logger.logDebug("    - %s", sig.Params().At(j).Type().String())
+				deps = append(deps, sig.Params().At(j).Type().String())
+			}
+		} else {
+			p.logger.logDebug("  He doesn't need arguments")
+		}
+
+		//TODO: Maybe create a special function?
+		graph.Nodes[resultType] = &di.ServiceNode{
+			Type:     resultType,
+			CtorName: ctorName,
+			Deps:     deps,
+		}
+	}
+}
+
+// Helper function to check if a file was created by our generator
+func isGeneratedFile(file *ast.File) bool {
+	// In Go AST, all comments at the beginning of a file are collected into file.Comments
+	for _, commentGroup := range file.Comments {
+		for _, comment := range commentGroup.List {
+			// Looking for a standard Go code generation marker
+			if comment.Text == "// Code generated by digen. DO NOT EDIT." {
+				return true
+			}
+		}
+	}
+	return false
+}
