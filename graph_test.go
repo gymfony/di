@@ -60,7 +60,7 @@ func TestDependencyGraph_Sort_Errors(t *testing.T) {
 	}{
 		{
 			name: "Detect circular dependency",
-			// Цикл: A требует B, B требует C, C требует A
+			// Cycle: A requires B, B requires C, C requires A.
 			nodes: map[string]*ServiceNode{
 				"A": {Type: "A", Deps: []string{"B"}},
 				"B": {Type: "B", Deps: []string{"C"}},
