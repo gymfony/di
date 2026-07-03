@@ -1,5 +1,7 @@
 .PHONY: test test-cover lint fmt check
 
+.DEFAULT_GOAL := help
+
 test:
 	go test -race -count=1 ./...
 

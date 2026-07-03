@@ -34,10 +34,21 @@ func main() {
 
 	graph, err := parser.Parse(*path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Parser Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	//TODO temporary output for GYM-9 stage
-	fmt.Println(graph)
+	sortedNodes, err := graph.Sort()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Graph Error: %v\n", err)
+		os.Exit(1)
+	}
+	if *verbose {
+		log.Debug("digen: dependency graph sorted successfully", "count", len(sortedNodes))
+	}
+
+	//TODO: delete it in GYM-11
+	for _, node := range sortedNodes {
+		fmt.Printf("-> %s (via %s)\n", node.Type, node.CtorName)
+	}
 }
