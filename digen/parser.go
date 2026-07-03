@@ -1,60 +1,49 @@
 package digen
 
 import (
-	"flag"
 	"fmt"
 	"go/ast"
 	"go/types"
+	"io"
+	"log/slog"
 
 	"github.com/gymfony/di"
 	"golang.org/x/tools/go/packages"
 )
 
 type Parser struct {
-	logger *ParserLogger
+	log *slog.Logger
 }
 
-func NewParser(logger *ParserLogger) *Parser {
-	return &Parser{
-		logger: logger,
+func NewParser(log *slog.Logger) *Parser {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	return &Parser{log: log}
 }
 
-func (p *Parser) Parse(args []string) (*di.DependencyGraph, error) {
+func (p *Parser) Parse(path string) (*di.DependencyGraph, error) {
 	graph := di.NewDependencyGraph()
 
-	path, err := p.getProjectPath(args)
-	if err != nil {
-		p.logger.logError("%v", err.Error())
-		return graph, err
+	if path == "" {
+		return graph, fmt.Errorf("digen: project path cannot be empty")
 	}
-	p.logger.logDebug("digen: project path is %s", path)
+
+	p.log.Debug("digen: project path defined", "path", path)
 
 	pkgs, err := p.getPackages(path)
 	if err != nil {
-		p.logger.logError("%v", err.Error())
+		p.log.Error("digen: package loading failed", "err", err)
 		return graph, err
 	}
 	if len(pkgs) == 0 {
-		p.logger.logInfo("digen: list of packages is empty")
-		return graph, err
+		p.log.Info("digen: list of packages is empty")
+		return graph, nil
 	}
 
 	p.parseAST(graph, pkgs)
 
 	return graph, nil
-}
-
-func (p *Parser) getProjectPath(args []string) (string, error) {
-	fs := flag.NewFlagSet("digen", flag.ContinueOnError)
-	path := fs.String("project-path", "./", "The path to your project where dependencies need to be generated")
-	if err := fs.Parse(args); err != nil {
-		return "", fmt.Errorf("digen: failed to parse flags: %w", err)
-	}
-	if *path == "" {
-		return "", fmt.Errorf("digen: project path cannot be empty")
-	}
-	return *path, nil
 }
 
 func (p *Parser) getPackages(path string) ([]*packages.Package, error) {
@@ -83,10 +72,10 @@ func (p *Parser) getPackages(path string) ([]*packages.Package, error) {
 func (p *Parser) parseAST(graph *di.DependencyGraph, pkgs []*packages.Package) {
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
-			p.logger.logDebug("digen: parse file: %s", file.Name)
+			p.log.Debug("digen: parsing file", "file", file.Name.Name)
 
 			if isGeneratedFile(file) {
-				p.logger.logDebug("digen: skip generated file: %s", file.Name)
+				p.log.Debug("digen: skipping generated file", "file", file.Name.Name)
 				continue
 			}
 
@@ -132,12 +121,12 @@ func (p *Parser) inspectNewSetCall(pkg *packages.Package, callExpr *ast.CallExpr
 		return
 	}
 
-	p.logger.logDebug("🎯 Found the real one %s.%s", pk.Path(), obj.Name())
+	p.log.Debug("digen: found provider set", "pkg", pk.Path(), "func", obj.Name())
 
 	for _, arg := range callExpr.Args {
 		tv, ok := pkg.TypesInfo.Types[arg]
 		if !ok {
-			p.logger.logWarn("Unable to determine type %s", arg)
+			p.log.Warn("digen: unable to determine type for argument", "arg", arg)
 			continue
 		}
 
@@ -146,12 +135,12 @@ func (p *Parser) inspectNewSetCall(pkg *packages.Package, callExpr *ast.CallExpr
 			continue
 		}
 		if sig.Results().Len() == 0 {
-			p.logger.logError("The constructor %s must return at least one value", sig.String())
+			p.log.Error("digen: constructor must return at least one value", "sig", sig.String())
 			continue
 		}
 
 		resultType := sig.Results().At(0).Type().String()
-		p.logger.logDebug("The constructor %s returns a type: %s", sig.String(), resultType)
+		p.log.Debug("digen: constructor analyzed", "sig", sig.String(), "returns", resultType)
 
 		ctorName := "unknown"
 		if ident, ok := arg.(*ast.Ident); ok {
@@ -160,17 +149,15 @@ func (p *Parser) inspectNewSetCall(pkg *packages.Package, callExpr *ast.CallExpr
 
 		// Querying the constructor's
 		var deps []string
-		if paramsLen := sig.Params().Len(); paramsLen > 0 {
-			p.logger.logDebug("It needs (%d) arguments:", paramsLen)
+		paramsLen := sig.Params().Len()
+		if paramsLen > 0 {
 			for j := 0; j < paramsLen; j++ {
-				p.logger.logDebug("    - %s", sig.Params().At(j).Type().String())
-				deps = append(deps, sig.Params().At(j).Type().String())
+				depType := sig.Params().At(j).Type().String()
+				p.log.Debug("digen: dependency found", "constructor", ctorName, "param", depType)
+				deps = append(deps, depType)
 			}
-		} else {
-			p.logger.logDebug("  He doesn't need arguments")
 		}
 
-		//TODO: Maybe create a special function?
 		graph.Nodes[resultType] = &di.ServiceNode{
 			Type:     resultType,
 			CtorName: ctorName,

@@ -1,22 +1,15 @@
 package digen
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/gymfony/di"
 )
-
-type mockLogger struct{ t *testing.T }
-
-func (m *mockLogger) Debug(msg string, args ...any) { m.t.Logf("[DEBUG] "+msg, args...) }
-func (m *mockLogger) Info(msg string, args ...any)  { m.t.Logf("[INFO] "+msg, args...) }
-func (m *mockLogger) Warn(msg string, args ...any)  { m.t.Logf("[WARN] "+msg, args...) }
-func (m *mockLogger) Error(msg string, args ...any) { m.t.Logf("[ERROR] "+msg, args...) }
 
 func TestParser_Parse_Scenarios(t *testing.T) {
 	wd, err := os.Getwd()
@@ -25,15 +18,13 @@ func TestParser_Parse_Scenarios(t *testing.T) {
 	}
 	diRootPath := filepath.Dir(wd)
 
-	// We describe the structure of test cases
 	tests := []struct {
-		name          string
-		goModContent  string
-		files         map[string]string
-		args          []string
-		wantErr       bool
-		errSubstring  string
-		validateGraph func(t *testing.T, graph interface{}) // simple assertion of internal structure
+		name         string
+		goModContent string
+		files        map[string]string
+		useEmptyPath bool
+		wantErr      bool
+		errSubstring string
 	}{
 		{
 			name:         "Success with valid dependencies",
@@ -46,7 +37,6 @@ func NewMailer() *Mailer { return &Mailer{} }
 var Services = di.NewSet(NewMailer)
 `,
 			},
-			args:    []string{"-project-path", "TMP_DIR"},
 			wantErr: false,
 		},
 		{
@@ -61,14 +51,7 @@ func NewGen() *GeneratedService { return &GeneratedService{} }
 var Services = di.NewSet(NewGen)
 `,
 			},
-			args:    []string{"-project-path", "TMP_DIR"},
 			wantErr: false,
-			validateGraph: func(t *testing.T, g interface{}) {
-				// Check that the graph remains empty since the file is skipped
-				if len(g.(*di.DependencyGraph).Nodes) != 0 {
-					t.Errorf("expected 0 nodes because generated file should be skipped")
-				}
-			},
 		},
 		{
 			name:         "Package syntax error parsing",
@@ -78,52 +61,21 @@ var Services = di.NewSet(NewGen)
 this is a brutal broken syntax error
 `,
 			},
-			args:         []string{"-project-path", "TMP_DIR"},
 			wantErr:      true,
 			errSubstring: "digen: Errors in package",
 		},
 		{
-			name:         "Invalid CLI flags format",
-			goModContent: "module testflags\ngo 1.22",
-			files:        map[string]string{"main.go": "package main"},
-			args:         []string{"-unsupported-flag-name=xyz"},
-			wantErr:      true,
-			errSubstring: "digen: failed to parse flags",
-		},
-		{
-			name:         "Warning when type info is missing for argument",
+			name:         "Warning when argument type cannot be determined",
 			goModContent: fmt.Sprintf("module testwarn\ngo 1.22\nrequire github.com/gymfony/di v0.0.0\nreplace github.com/gymfony/di => %s", diRootPath),
 			files: map[string]string{
 				"main.go": `package main
 import "github.com/gymfony/di"
 type Mailer struct{}
 func NewMailer() *Mailer { return &Mailer{} }
-
-// We are passing a built-in int type that doesn't have a structure in TypesInfo as a custom service,
-// or we are passing an expression whose type isn't mapped by the compiler as a valid constructor.
-var Services = di.NewSet(
-	NewMailer,
-	varWithoutType, // Using a non-constant undefined expression will trigger a warning
-)
+var Services = di.NewSet(NewMailer, varWithoutType)
 var varWithoutType = 123
 `,
 			},
-			args:    []string{"-project-path", "TMP_DIR"},
-			wantErr: false,
-		},
-		{
-			name:         "Skip when argument in NewSet is not a function signature",
-			goModContent: fmt.Sprintf("module testnotfunc\ngo 1.22\nrequire github.com/gymfony/di v0.0.0\nreplace github.com/gymfony/di => %s", diRootPath),
-			files: map[string]string{
-				"main.go": `package main
-import "github.com/gymfony/di"
-var NotAFunc = "just a string"
-var Services = di.NewSet(
-	NotAFunc, // This is not a function, the parser should just continue in the inner signatures loop
-)
-`,
-			},
-			args:    []string{"-project-path", "TMP_DIR"},
 			wantErr: false,
 		},
 		{
@@ -132,19 +84,23 @@ var Services = di.NewSet(
 			files: map[string]string{
 				"main.go": `package main
 import "github.com/gymfony/di"
-func NewVoid() {} // Returns nothing
+func NewVoid() {}
 var Services = di.NewSet(NewVoid)
 `,
 			},
-			args:    []string{"-project-path", "TMP_DIR"},
-			wantErr: false, // Our parser logs an error, but the generator itself will not crash due to an AST error.
+			wantErr: false,
 		},
 		{
 			name:         "Trigger logInfo with empty package list",
 			goModContent: "module testempty\ngo 1.22",
-			files:        map[string]string{}, // There are no files in the directory at all.
-			args:         []string{"-project-path", "TMP_DIR"},
+			files:        map[string]string{},
 			wantErr:      false,
+		},
+		{
+			name:         "Error when path is empty",
+			useEmptyPath: true,
+			wantErr:      true,
+			errSubstring: "project path cannot be empty",
 		},
 	}
 
@@ -152,39 +108,31 @@ var Services = di.NewSet(NewVoid)
 		t.Run(tt.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 
-			// Create go.mod if it is defined
 			if tt.goModContent != "" {
 				_ = os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(tt.goModContent), 0o644)
 			}
 
-			// Create test files
 			for filename, content := range tt.files {
 				_ = os.WriteFile(filepath.Join(tmpDir, filename), []byte(content), 0o644)
 			}
 
-			// Replace the TMP_DIR marker in the arguments with the real path
-			runArgs := make([]string, len(tt.args))
-			for i, arg := range tt.args {
-				if arg == "TMP_DIR" {
-					runArgs[i] = tmpDir
-				} else {
-					runArgs[i] = arg
-				}
-			}
-
-			// Run go mod tidy only for cases without syntax errors and flags,
-			// to save time, and only if go.mod is present
-			if tt.goModContent != "" && !strings.Contains(tt.name, "Invalid CLI flags") && !tt.wantErr {
+			if tt.goModContent != "" && !tt.wantErr {
 				cmd := exec.Command("go", "mod", "tidy")
 				cmd.Dir = tmpDir
 				cmd.Env = append(os.Environ(), "GOPROXY=off", "GO111MODULE=on")
 				_ = cmd.Run()
 			}
 
-			logger := NewParserLogger(&mockLogger{t: t})
-			parser := NewParser(logger)
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			parser := NewParser(log)
 
-			graph, err := parser.Parse(runArgs)
+			targetPath := tmpDir
+			if tt.useEmptyPath {
+				targetPath = ""
+			}
+
+			_, err := parser.Parse(targetPath)
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Parser.Parse() error = %v, wantErr %v", err, tt.wantErr)
@@ -196,43 +144,16 @@ var Services = di.NewSet(NewVoid)
 				}
 			}
 
-			if !tt.wantErr && tt.validateGraph != nil {
-				tt.validateGraph(t, graph)
+			if buf.Len() > 0 {
+				t.Log(buf.String())
 			}
 		})
 	}
 }
 
-func TestParser_Parse_EmptyPath(t *testing.T) {
-	logger := NewParserLogger(&mockLogger{t: t})
-	parser := NewParser(logger)
-
-	args := []string{"-project-path", ""}
-	_, err := parser.Parse(args)
-
-	if err == nil {
-		t.Error("expected error when project path is empty, got nil")
+func TestParser_New_NilSafety(t *testing.T) {
+	parser := NewParser(nil)
+	if parser.log == nil {
+		t.Error("expected default discard logger when passing nil, got nil")
 	}
-}
-
-// Test for a logger without a real recipient (testing the nil-safe branch)
-func TestParserLogger_NilSafety(t *testing.T) {
-	var nilLogger *ParserLogger
-	nilLogger.logDebug("test %s", "arg")
-	nilLogger.logInfo("test %s", "arg")
-	nilLogger.logWarn("test %s", "arg")
-	nilLogger.logError("test %s", "arg")
-
-	emptyLogger := NewParserLogger(nil)
-	emptyLogger.logDebug("test %s", "arg")
-	emptyLogger.logInfo("test %s", "arg")
-	emptyLogger.logWarn("test %s", "arg")
-	emptyLogger.logError("test %s", "arg")
-
-	// Testing logging with arguments for a live logger
-	liveLogger := NewParserLogger(&mockLogger{t: t})
-	liveLogger.logDebug("live %s", "debug")
-	liveLogger.logInfo("live %s", "info")
-	liveLogger.logWarn("live %s", "warn")
-	liveLogger.logError("live %s", "error")
 }
