@@ -134,3 +134,102 @@ func TestDependencyGraph_Sort_Empty(t *testing.T) {
 		t.Errorf("expected empty result, got %d nodes", len(result))
 	}
 }
+
+func TestDependencyGraph_Sort_Tags_Success(t *testing.T) {
+	// Scenario: App requires []test.Plugin. Two plugins are registered with this tag.
+	// Expected order: Both plugins should be initialized BEFORE App.
+	g := &DependencyGraph{
+		Nodes: map[string]*ServiceNode{
+			"*test.App": {
+				Type:     "*test.App",
+				CtorName: "NewApp",
+				Deps:     []string{"[]test.Plugin"},
+			},
+			"*test.PluginOne": {
+				Type:     "*test.PluginOne",
+				CtorName: "NewPluginOne",
+				Tags:     []string{"test.Plugin"},
+			},
+			"*test.PluginTwo": {
+				Type:     "*test.PluginTwo",
+				CtorName: "NewPluginTwo",
+				Tags:     []string{"test.Plugin"},
+			},
+		},
+	}
+
+	result, err := g.Sort()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if len(result) != 3 {
+		t.Fatalf("expected 3 nodes in result, got %d", len(result))
+	}
+
+	positions := make(map[string]int)
+	for i, node := range result {
+		positions[node.Type] = i
+	}
+
+	// Check that both plugins are created before App
+	if positions["*test.PluginOne"] > positions["*test.App"] {
+		t.Error("expected *test.PluginOne to be initialized before *test.App")
+	}
+	if positions["*test.PluginTwo"] > positions["*test.App"] {
+		t.Error("expected *test.PluginTwo to be initialized before *test.App")
+	}
+}
+
+func TestDependencyGraph_Sort_Tags_EmptySlice(t *testing.T) {
+	// Scenario: App requires []test.Plugin, but there are no plugins in the graph.
+	// The graph should sort successfully without failing with a MissingProviderError.
+	g := &DependencyGraph{
+		Nodes: map[string]*ServiceNode{
+			"*test.App": {
+				Type:     "*test.App",
+				CtorName: "NewApp",
+				Deps:     []string{"[]test.Plugin"},
+			},
+		},
+	}
+
+	result, err := g.Sort()
+	if err != nil {
+		t.Fatalf("expected no error for empty tag slice, got: %v", err)
+	}
+
+	if len(result) != 1 || result[0].Type != "*test.App" {
+		t.Errorf("expected result to contain only *test.App, got %v", result)
+	}
+}
+
+func TestDependencyGraph_Sort_Tags_Cycle(t *testing.T) {
+	// Scenario: A vicious circle through tags.
+	// *test.Plugin requires *test.App, and *test.App requires []test.Plugin.
+	g := &DependencyGraph{
+		Nodes: map[string]*ServiceNode{
+			"*test.App": {
+				Type:     "*test.App",
+				CtorName: "NewApp",
+				Deps:     []string{"[]test.Plugin"},
+			},
+			"*test.Plugin": {
+				Type:     "*test.Plugin",
+				CtorName: "NewPlugin",
+				Deps:     []string{"*test.App"},
+				Tags:     []string{"test.Plugin"},
+			},
+		},
+	}
+
+	_, err := g.Sort()
+	if err == nil {
+		t.Fatal("expected an error due to circular dependency via tags, got nil")
+	}
+
+	var cycleErr *CycleError
+	if !errors.As(err, &cycleErr) {
+		t.Fatalf("expected *CycleError, got %T (%v)", err, err)
+	}
+}
