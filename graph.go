@@ -1,10 +1,13 @@
 package di
 
+import "strings"
+
 // ServiceNode represents a single service in the code generation graph.
 type ServiceNode struct {
 	Type     string   // The name of the return type (e.g. "*myproject/cmd/di.UserService")
 	CtorName string   // The name of the constructor function (e.g. "NewUserService")
 	Deps     []string // List of dependency types (constructor arguments)
+	Tags     []string // The names of the tags this service is bound to (e.g. ["api_routes"])
 }
 
 // DependencyGraph accumulates all nodes for analysis
@@ -58,10 +61,8 @@ func (g *DependencyGraph) Sort() ([]*ServiceNode, error) {
 			}
 		}
 
-		for _, depType := range node.Deps {
-			if err := visit(depType); err != nil {
-				return err
-			}
+		if err := g.visitDeps(node, visit); err != nil {
+			return err
 		}
 
 		stack = stack[:len(stack)-1]
@@ -80,4 +81,35 @@ func (g *DependencyGraph) Sort() ([]*ServiceNode, error) {
 	}
 
 	return result, nil
+}
+
+// visitDeps iterates through all node dependencies and runs visit on them.
+func (g *DependencyGraph) visitDeps(node *ServiceNode, visit func(string) error) error {
+	for _, depType := range node.Deps {
+		if strings.HasPrefix(depType, "[]") {
+			if err := g.visitTagDeps(strings.TrimPrefix(depType, "[]"), visit); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := visit(depType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// visitTagDeps finds all nodes marked with a given tag and calls visit on them.
+func (g *DependencyGraph) visitTagDeps(cleanTagType string, visit func(string) error) error {
+	for _, potentialNode := range g.Nodes {
+		for _, t := range potentialNode.Tags {
+			if t == cleanTagType {
+				if err := visit(potentialNode.Type); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }

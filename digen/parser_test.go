@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gymfony/di"
 )
 
 func TestParser_Parse_Scenarios(t *testing.T) {
@@ -25,6 +27,7 @@ func TestParser_Parse_Scenarios(t *testing.T) {
 		useEmptyPath bool
 		wantErr      bool
 		errSubstring string
+		assertGraph  func(t *testing.T, graph *di.DependencyGraph)
 	}{
 		{
 			name:         "Success with valid dependencies",
@@ -102,6 +105,62 @@ var Services = di.NewSet(NewVoid)
 			wantErr:      true,
 			errSubstring: "project path cannot be empty",
 		},
+		{
+			name:         "Success with di.Tag extraction",
+			goModContent: fmt.Sprintf("module testtags\ngo 1.22\nrequire github.com/gymfony/di v0.0.0\nreplace github.com/gymfony/di => %s", diRootPath),
+			files: map[string]string{
+				"main.go": `package main
+import "github.com/gymfony/di"
+
+type Plugin interface {
+	Init()
+}
+
+type MyPlugin struct{}
+func (p *MyPlugin) Init() {}
+
+func NewPlugin() *MyPlugin { return &MyPlugin{} }
+
+type App struct {
+	Plugins []Plugin
+}
+
+func NewApp(plugins []Plugin) *App { return &App{Plugins: plugins} }
+
+var PluginTag = di.NewTagKey[Plugin]("plugins")
+
+var Services = di.NewSet(
+	di.Tag(NewPlugin, PluginTag),
+	NewApp,
+)
+`,
+			},
+			wantErr: false,
+			assertGraph: func(t *testing.T, graph *di.DependencyGraph) {
+				// 1. Проверяем, что узел плагина распарсился корректно, несмотря на обёртку di.Tag
+				pluginNode, exists := graph.Nodes["*testtags.MyPlugin"]
+				if !exists {
+					t.Fatalf("expected node '*testtags.MyPlugin' to exist in graph")
+				}
+				if pluginNode.CtorName != "NewPlugin" {
+					t.Errorf("expected CtorName 'NewPlugin', got %q", pluginNode.CtorName)
+				}
+
+				// Проверяем, что дженерик-тип тега успешно извлёкся в слайс Tags
+				if len(pluginNode.Tags) != 1 || pluginNode.Tags[0] != "testtags.Plugin" {
+					t.Errorf("expected tags [\"testtags.Plugin\"], got %v", pluginNode.Tags)
+				}
+
+				// 2. Проверяем узел приложения, который зависит от слайса интерфейсов
+				appNode, exists := graph.Nodes["*testtags.App"]
+				if !exists {
+					t.Fatalf("expected node '*testtags.App' to exist in graph")
+				}
+				if len(appNode.Deps) != 1 || appNode.Deps[0] != "[]testtags.Plugin" {
+					t.Errorf("expected dependencies [\"[]testtags.Plugin\"], got %v", appNode.Deps)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -132,7 +191,7 @@ var Services = di.NewSet(NewVoid)
 				targetPath = ""
 			}
 
-			_, err := parser.Parse(targetPath)
+			graph, err := parser.Parse(targetPath)
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Parser.Parse() error = %v, wantErr %v", err, tt.wantErr)
@@ -142,6 +201,10 @@ var Services = di.NewSet(NewVoid)
 				if !strings.Contains(err.Error(), tt.errSubstring) {
 					t.Errorf("expected error containing %q, got %q", tt.errSubstring, err.Error())
 				}
+			}
+
+			if !tt.wantErr && tt.assertGraph != nil {
+				tt.assertGraph(t, graph)
 			}
 
 			if buf.Len() > 0 {
